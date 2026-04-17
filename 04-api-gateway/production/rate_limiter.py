@@ -11,7 +11,7 @@ Algorithm: Sliding Window Counter
 """
 import time
 from collections import defaultdict, deque
-from fastapi import HTTPException, Request
+from fastapi import HTTPException
 
 
 class RateLimiter:
@@ -82,6 +82,6 @@ class RateLimiter:
         }
 
 
-# Singleton instances cho các tiers khác nhau
-rate_limiter_user = RateLimiter(max_requests=10, window_seconds=60)   # User: 10 req/phút
-rate_limiter_admin = RateLimiter(max_requests=100, window_seconds=60)  # Admin: 100 req/phút
+# Singleton cho user thường.
+# Admin bypass hoàn toàn trong app.py để đúng yêu cầu bài lab.
+rate_limiter_user = RateLimiter(max_requests=10, window_seconds=60)

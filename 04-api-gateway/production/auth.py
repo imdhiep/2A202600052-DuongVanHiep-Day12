@@ -5,8 +5,8 @@ JWT (JSON Web Token) = stateless auth.
 Token chứa: user_id, role, expiry → không cần check DB mỗi request.
 
 Flow:
-    POST /auth/token  → trả về JWT
-    GET  /ask         → gửi JWT trong header Authorization: Bearer <token>
+    POST /token       → trả về JWT
+    POST /ask         → gửi JWT trong header Authorization: Bearer <token>
     Server verify signature → extract user info → process request
 """
 import os
@@ -25,8 +25,8 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 60
 
 # Demo users (trong thực tế lưu trong database)
 DEMO_USERS = {
-    "student": {"password": "demo123", "role": "user", "daily_limit": 50},
-    "teacher": {"password": "teach456", "role": "admin", "daily_limit": 1000},
+    "student": {"password": "demo123", "role": "user"},
+    "admin": {"password": "secret", "role": "admin"},
 }
 
 security = HTTPBearer(auto_error=False)

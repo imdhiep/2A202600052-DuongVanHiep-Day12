@@ -1,106 +1,144 @@
 """
-ADVANCED — Stateless Agent với Redis Session
+ADVANCED — Stateless Agent với Redis-backed sessions.
 
-Stateless = agent không giữ state trong memory.
-Mọi state (session, conversation history) lưu trong Redis.
-
-Tại sao stateless quan trọng khi scale?
-  Instance 1: User A gửi request 1 → lưu session trong memory
-  Instance 2: User A gửi request 2 → KHÔNG có session! Bug!
-
-  ✅ Giải pháp: Lưu session trong Redis
-  Bất kỳ instance nào cũng đọc được session của user.
-
-Demo:
-  docker compose up
-  # Sau đó test multi-turn conversation
-  python test_stateless.py
+Mục tiêu:
+  1. Không lưu conversation state trong memory
+  2. Health/readiness phản ánh đúng tình trạng Redis
+  3. Graceful shutdown: ngừng nhận request mới, chờ request đang chạy xong
+  4. Hỗ trợ nhiều instances phía sau load balancer
 """
-import os
-import time
+
+from __future__ import annotations
+
 import json
 import logging
+import os
+import signal
+import time
 import uuid
-from datetime import datetime, timezone
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
-
-from fastapi import FastAPI, HTTPException, Header
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+import redis
 import uvicorn
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
+
 from utils.mock_llm import ask
 
-# ── Redis (optional — fallback to in-memory dict nếu không có Redis)
-try:
-    import redis
-    REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-    _redis = redis.from_url(REDIS_URL, decode_responses=True)
-    _redis.ping()
-    USE_REDIS = True
-    print("✅ Connected to Redis")
-except Exception:
-    USE_REDIS = False
-    _memory_store: dict = {}
-    print("⚠️  Redis not available — using in-memory store (not scalable!)")
-
-
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
 START_TIME = time.time()
 INSTANCE_ID = os.getenv("INSTANCE_ID", f"instance-{uuid.uuid4().hex[:6]}")
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+SESSION_TTL_SECONDS = int(os.getenv("SESSION_TTL_SECONDS", "3600"))
+MAX_HISTORY_MESSAGES = 20
+
+_redis: redis.Redis | None = None
+_is_ready = False
+_shutting_down = False
+_in_flight_requests = 0
 
 
-# ──────────────────────────────────────────────────────────
-# Session Storage (Redis-backed, Stateless-compatible)
-# ──────────────────────────────────────────────────────────
+class ChatRequest(BaseModel):
+    question: str = Field(..., min_length=1, max_length=1000)
+    session_id: str | None = None
 
-def save_session(session_id: str, data: dict, ttl_seconds: int = 3600):
-    """Lưu session vào Redis với TTL."""
-    serialized = json.dumps(data)
-    if USE_REDIS:
-        _redis.setex(f"session:{session_id}", ttl_seconds, serialized)
-    else:
-        _memory_store[f"session:{session_id}"] = data
+
+def _session_key(session_id: str) -> str:
+    return f"session:{session_id}"
+
+
+def redis_client() -> redis.Redis:
+    if _redis is None:
+        raise HTTPException(status_code=503, detail="Redis not connected")
+    return _redis
+
+
+def require_serving_ready() -> None:
+    if _shutting_down:
+        raise HTTPException(status_code=503, detail="Instance is shutting down")
+    if not _is_ready:
+        raise HTTPException(status_code=503, detail="Instance not ready")
 
 
 def load_session(session_id: str) -> dict:
-    """Load session từ Redis."""
-    if USE_REDIS:
-        data = _redis.get(f"session:{session_id}")
-        return json.loads(data) if data else {}
-    return _memory_store.get(f"session:{session_id}", {})
+    raw = redis_client().get(_session_key(session_id))
+    if not raw:
+        return {"history": []}
+    session = json.loads(raw)
+    session.setdefault("history", [])
+    return session
 
 
-def append_to_history(session_id: str, role: str, content: str):
-    """Thêm message vào conversation history."""
+def save_session(session_id: str, session: dict) -> None:
+    session["history"] = session.get("history", [])[-MAX_HISTORY_MESSAGES:]
+    session["updated_at"] = datetime.now(timezone.utc).isoformat()
+    redis_client().setex(
+        _session_key(session_id),
+        SESSION_TTL_SECONDS,
+        json.dumps(session),
+    )
+
+
+def append_to_history(session_id: str, role: str, content: str) -> dict:
     session = load_session(session_id)
-    history = session.get("history", [])
-    history.append({
-        "role": role,
-        "content": content,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    })
-    # Giữ tối đa 20 messages (10 turns)
-    if len(history) > 20:
-        history = history[-20:]
-    session["history"] = history
+    history = session.setdefault("history", [])
+    history.append(
+        {
+            "role": role,
+            "content": content,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    )
     save_session(session_id, session)
-    return history
+    return session
+
+
+def handle_sigterm(signum, frame):
+    global _shutting_down, _is_ready
+    _shutting_down = True
+    _is_ready = False
+    logger.info("Received signal %s. Marking instance as not ready.", signum)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info(f"Starting instance {INSTANCE_ID}")
-    logger.info(f"Storage: {'Redis ✅' if USE_REDIS else 'In-memory ⚠️'}")
-    yield
-    logger.info(f"Instance {INSTANCE_ID} shutting down")
+    global _redis, _is_ready, _shutting_down
 
+    logger.info("Starting instance %s", INSTANCE_ID)
+    logger.info("Connecting to Redis at %s", REDIS_URL)
+    _redis = redis.from_url(REDIS_URL, decode_responses=True)
+    _redis.ping()
+    _shutting_down = False
+    _is_ready = True
+    logger.info("Instance %s is ready", INSTANCE_ID)
+
+    try:
+        yield
+    finally:
+        _shutting_down = True
+        _is_ready = False
+        wait_seconds = 0
+        timeout_seconds = 30
+        while _in_flight_requests > 0 and wait_seconds < timeout_seconds:
+            logger.info("Waiting for %s in-flight requests...", _in_flight_requests)
+            time.sleep(1)
+            wait_seconds += 1
+        if _redis is not None:
+            _redis.close()
+        logger.info("Instance %s shutdown complete", INSTANCE_ID)
+
+
+signal.signal(signal.SIGTERM, handle_sigterm)
+signal.signal(signal.SIGINT, handle_sigterm)
 
 app = FastAPI(
     title="Stateless Agent",
-    version="4.0.0",
+    version="4.1.0",
     lifespan=lifespan,
 )
 
@@ -112,109 +150,117 @@ app.add_middleware(
 )
 
 
-# ──────────────────────────────────────────────────────────
-# Models
-# ──────────────────────────────────────────────────────────
+@app.middleware("http")
+async def track_requests(request: Request, call_next):
+    global _in_flight_requests
 
-class ChatRequest(BaseModel):
-    question: str
-    session_id: str | None = None  # None = tạo session mới
+    if _shutting_down and request.url.path not in {"/health", "/ready"}:
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "Instance is shutting down"},
+        )
+
+    _in_flight_requests += 1
+    try:
+        response = await call_next(request)
+        return response
+    finally:
+        _in_flight_requests -= 1
 
 
-# ──────────────────────────────────────────────────────────
-# Endpoints
-# ──────────────────────────────────────────────────────────
+@app.get("/")
+def root():
+    return {
+        "message": "Stateless agent is running",
+        "instance_id": INSTANCE_ID,
+    }
+
 
 @app.post("/chat")
 async def chat(body: ChatRequest):
-    """
-    Multi-turn conversation với session management.
+    require_serving_ready()
 
-    Gửi session_id trong các request tiếp theo để tiếp tục cuộc trò chuyện.
-    Agent có thể chạy trên bất kỳ instance nào — state trong Redis.
-    """
-    # Tạo hoặc dùng session hiện có
     session_id = body.session_id or str(uuid.uuid4())
+    session = append_to_history(session_id, "user", body.question)
+    user_turn = len([msg for msg in session["history"] if msg["role"] == "user"])
 
-    # Thêm câu hỏi vào history
-    append_to_history(session_id, "user", body.question)
-
-    # Gọi LLM với context (trong mock, ta chỉ dùng câu hỏi hiện tại)
-    session = load_session(session_id)
-    history = session.get("history", [])
     answer = ask(body.question)
-
-    # Lưu response vào history
     append_to_history(session_id, "assistant", answer)
 
     return {
         "session_id": session_id,
         "question": body.question,
         "answer": answer,
-        "turn": len([m for m in history if m["role"] == "user"]) + 1,
-        "served_by": INSTANCE_ID,  # ← thấy rõ bất kỳ instance nào cũng serve được
-        "storage": "redis" if USE_REDIS else "in-memory",
+        "turn": user_turn,
+        "served_by": INSTANCE_ID,
+        "storage": "redis",
     }
 
 
 @app.get("/chat/{session_id}/history")
 def get_history(session_id: str):
-    """Xem conversation history của một session."""
+    require_serving_ready()
     session = load_session(session_id)
-    if not session:
+    history = session.get("history", [])
+    if not history:
         raise HTTPException(404, f"Session {session_id} not found or expired")
     return {
         "session_id": session_id,
-        "messages": session.get("history", []),
-        "count": len(session.get("history", [])),
+        "messages": history,
+        "count": len(history),
+        "served_by": INSTANCE_ID,
     }
 
 
 @app.delete("/chat/{session_id}")
 def delete_session(session_id: str):
-    """Xóa session (user logout)."""
-    if USE_REDIS:
-        _redis.delete(f"session:{session_id}")
-    else:
-        _memory_store.pop(f"session:{session_id}", None)
-    return {"deleted": session_id}
+    require_serving_ready()
+    deleted = redis_client().delete(_session_key(session_id))
+    return {"deleted": bool(deleted), "session_id": session_id}
 
-
-# ──────────────────────────────────────────────────────────
-# Health / Metrics
-# ──────────────────────────────────────────────────────────
 
 @app.get("/health")
 def health():
     redis_ok = False
-    if USE_REDIS:
+    if _redis is not None:
         try:
             _redis.ping()
             redis_ok = True
-        except Exception:
+        except redis.RedisError:
             redis_ok = False
 
-    status = "ok" if (not USE_REDIS or redis_ok) else "degraded"
-
+    status = "ok" if redis_ok else "degraded"
     return {
         "status": status,
         "instance_id": INSTANCE_ID,
         "uptime_seconds": round(time.time() - START_TIME, 1),
-        "storage": "redis" if USE_REDIS else "in-memory",
-        "redis_connected": redis_ok if USE_REDIS else "N/A",
+        "storage": "redis",
+        "redis_connected": redis_ok,
+        "shutting_down": _shutting_down,
     }
 
 
 @app.get("/ready")
 def ready():
-    if USE_REDIS:
-        try:
-            _redis.ping()
-        except Exception:
-            raise HTTPException(503, "Redis not available")
-    return {"ready": True, "instance": INSTANCE_ID}
+    if _shutting_down or not _is_ready:
+        raise HTTPException(status_code=503, detail="Instance not ready")
+    try:
+        redis_client().ping()
+    except redis.RedisError as exc:
+        raise HTTPException(status_code=503, detail="Redis not available") from exc
+    return {
+        "ready": True,
+        "instance_id": INSTANCE_ID,
+        "in_flight_requests": _in_flight_requests,
+    }
 
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port, reload=True)
+    logger.info("Starting stateless agent on port %s", port)
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=port,
+        timeout_graceful_shutdown=30,
+    )
