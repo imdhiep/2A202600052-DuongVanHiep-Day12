@@ -1,102 +1,155 @@
 # Deployment Information
 
+> **Student Name:** Dương Văn Hiệp  
+> **Student ID:** 2A202600052  
+> **Verified Date:** 17-04-2026
+
 ## Public URL
 
-Pending deployment. The repository is prepared for Railway or Render, but a real public URL still needs to be created from a live cloud account.
+[https://day12-production-d371.up.railway.app](https://day12-production-d371.up.railway.app)
 
 ## Platform
 
-Recommended: Railway or Render with Redis attached.
-
-## Prepared deployment assets
-
-- Railway config: [06-lab-complete/railway.toml](/d:/python ky 9/day12_ha-tang-cloud_va_deployment/06-lab-complete/railway.toml)
-- Render config: [06-lab-complete/render.yaml](/d:/python ky 9/day12_ha-tang-cloud_va_deployment/06-lab-complete/render.yaml)
-- Production app: [06-lab-complete/app/main.py](/d:/python ky 9/day12_ha-tang-cloud_va_deployment/06-lab-complete/app/main.py)
-
-## Required environment variables
-
-- `PORT`
-- `REDIS_URL`
-- `AGENT_API_KEY`
-- `JWT_SECRET`
-- `MONTHLY_BUDGET_USD`
-- `GLOBAL_MONTHLY_BUDGET_USD`
-- `RATE_LIMIT_PER_MINUTE`
-- `WEB_CONCURRENCY`
-- `LOG_LEVEL`
+Railway
 
 ## Test Commands
 
 ### Health Check
 
 ```bash
-curl https://your-agent-domain/health
+curl https://day12-production-d371.up.railway.app/health
 ```
 
-Expected:
+Expected live output:
 
 ```json
 {
-  "status": "ok"
+  "status": "ok",
+  "checks": {
+    "redis": true,
+    "conversation_store": "redis",
+    "rate_limiter": "redis",
+    "cost_guard": "redis"
+  }
 }
 ```
 
 ### Readiness Check
 
 ```bash
-curl https://your-agent-domain/ready
+curl https://day12-production-d371.up.railway.app/ready
 ```
 
-### Authenticated API Test
+Expected live output:
+
+```json
+{
+  "ready": true,
+  "storage_backend": "redis"
+}
+```
+
+### Authentication Required
 
 ```bash
-curl -X POST https://your-agent-domain/ask \
+curl -X POST https://day12-production-d371.up.railway.app/ask \
+  -H "Content-Type: application/json" \
+  -d '{"user_id":"test","question":"Hello"}'
+```
+
+Expected: `401 Unauthorized`
+
+### API Test (with authentication)
+
+```bash
+curl -X POST https://day12-production-d371.up.railway.app/ask \
   -H "X-API-Key: YOUR_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"user_id":"test-user","question":"My name is Alice"}'
+  -d '{"user_id":"test","question":"Hello"}'
+```
+
+Expected: `200 OK`
+
+Example live response:
+
+```json
+{
+  "user_id": "api-key-check",
+  "question": "Hello",
+  "answer": "Hello! How can I assist you today?",
+  "model": "gpt-4o-mini",
+  "storage_backend": "redis"
+}
 ```
 
 ### Conversation Memory Test
 
 ```bash
-curl -X POST https://your-agent-domain/ask \
+curl -X POST https://day12-production-d371.up.railway.app/ask \
   -H "X-API-Key: YOUR_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"user_id":"test-user","question":"What is my name?"}'
+  -d '{"user_id":"memory-test","question":"My name is Alice"}'
+
+curl -X POST https://day12-production-d371.up.railway.app/ask \
+  -H "X-API-Key: YOUR_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"user_id":"memory-test","question":"What is my name?"}'
 ```
 
-Expected behavior: the answer should mention `Alice`.
+Expected: the second answer should mention `Alice`.
 
-### Rate Limit Test
+### Rate Limiting
 
 ```bash
 for i in {1..15}; do
-  curl -X POST https://your-agent-domain/ask \
+  curl -X POST https://day12-production-d371.up.railway.app/ask \
     -H "X-API-Key: YOUR_KEY" \
     -H "Content-Type: application/json" \
-    -d '{"user_id":"rate-test","question":"test"}'
+    -d "{\"user_id\":\"rate-test\",\"question\":\"test $i\"}"
 done
 ```
 
-Expected behavior: later requests should return `429`.
+Expected: request `11` or later should return `429`.
 
-## Deployment checklist
+### Optional JWT Demo
 
-- Attach Redis before switching to `ENVIRONMENT=production`
-- Set a strong `AGENT_API_KEY`
-- Set a strong `JWT_SECRET`
-- Confirm `/health` returns `200`
-- Confirm `/ready` returns `200`
-- Confirm `/ask` returns `401` without credentials
-- Confirm `/ask` remembers conversation state with the same `user_id`
+```bash
+curl -X POST https://day12-production-d371.up.railway.app/auth/token \
+  -H "Content-Type: application/json" \
+  -d '{"username":"student","password":"demo123"}'
+```
+
+## Environment Variables Set
+
+- `PORT`
+- `REDIS_URL`
+- `AGENT_API_KEY`
+- `JWT_SECRET`
+- `OPENAI_API_KEY`
+- `LLM_MODEL`
+- `RATE_LIMIT_PER_MINUTE`
+- `RATE_LIMIT_WINDOW_SECONDS`
+- `MONTHLY_BUDGET_USD`
+- `GLOBAL_MONTHLY_BUDGET_USD`
+- `WEB_CONCURRENCY`
+- `LOG_LEVEL`
+
+## Deployment Assets
+
+- Railway config: [06-lab-complete/railway.toml](/D:/python ky 9/day12_ha-tang-cloud_va_deployment/06-lab-complete/railway.toml)
+- Render config: [06-lab-complete/render.yaml](/D:/python ky 9/day12_ha-tang-cloud_va_deployment/06-lab-complete/render.yaml)
+- Production app: [06-lab-complete/app/main.py](/D:/python ky 9/day12_ha-tang-cloud_va_deployment/06-lab-complete/app/main.py)
+- Final project guide: [06-lab-complete/README.md](/D:/python ky 9/day12_ha-tang-cloud_va_deployment/06-lab-complete/README.md)
 
 ## Screenshots
 
-- Add cloud dashboard screenshot to `screenshots/dashboard.png`
-- Add service status screenshot to `screenshots/service-running.png`
-- Add test result screenshot to `screenshots/api-test.png`
+- [Redis service screenshot](</D:/python ky 9/day12_ha-tang-cloud_va_deployment/screenshots/redis.jpg>)
+- Add Railway app dashboard screenshot to `screenshots/dashboard.png`
+- Add service running screenshot to `screenshots/running.png`
+- Add API test screenshot to `screenshots/test.png`
 
-## Final note
+## Final Notes
 
-The codebase is deployment-ready. The only remaining manual step is authenticating to a cloud platform and provisioning the live service plus Redis instance.
+- The deployment is live and verified.
+- Redis is connected and active in production.
+- The final manual step before submission is adding the remaining screenshots to the `screenshots/` folder.
