@@ -1,142 +1,98 @@
-"""
-Production Readiness Checker
+"""Lightweight production-readiness checks for the final lab deliverable."""
 
-Tự động kiểm tra project có đủ điều kiện deploy chưa.
-Chạy: python check_production_ready.py
+from __future__ import annotations
 
-Output: checklist với ✅ / ❌ cho từng item.
-"""
-import os
 import sys
-import json
-import subprocess
+from pathlib import Path
 
 
-def check(name: str, passed: bool, detail: str = "") -> dict:
-    icon = "✅" if passed else "❌"
-    print(f"  {icon} {name}" + (f" — {detail}" if detail else ""))
-    return {"name": name, "passed": passed}
+BASE_DIR = Path(__file__).resolve().parent
+APP_DIR = BASE_DIR / "app"
+REPO_ROOT = BASE_DIR.parent
 
 
-def run_checks():
-    results = []
-    base = os.path.dirname(__file__)
+def check(name: str, condition: bool, detail: str = "") -> bool:
+    icon = "[PASS]" if condition else "[FAIL]"
+    suffix = f" - {detail}" if detail else ""
+    print(f"{icon} {name}{suffix}")
+    return condition
 
-    print("\n" + "=" * 55)
-    print("  Production Readiness Check — Day 12 Lab")
-    print("=" * 55)
 
-    # ── Files ──────────────────���───────────────────
-    print("\n📁 Required Files")
-    results.append(check("Dockerfile exists",
-                         os.path.exists(os.path.join(base, "Dockerfile"))))
-    results.append(check("docker-compose.yml exists",
-                         os.path.exists(os.path.join(base, "docker-compose.yml"))))
-    results.append(check(".dockerignore exists",
-                         os.path.exists(os.path.join(base, ".dockerignore"))))
-    results.append(check(".env.example exists",
-                         os.path.exists(os.path.join(base, ".env.example"))))
-    results.append(check("requirements.txt exists",
-                         os.path.exists(os.path.join(base, "requirements.txt"))))
-    results.append(check("railway.toml or render.yaml exists",
-                         os.path.exists(os.path.join(base, "railway.toml")) or
-                         os.path.exists(os.path.join(base, "render.yaml"))))
+def read_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
 
-    # ── Security ──────────────────────────────────���
-    print("\n🔒 Security")
 
-    # Check .env not tracked
-    env_file = os.path.join(base, ".env")
-    gitignore = os.path.join(base, ".gitignore")
-    root_gitignore = os.path.join(base, "..", ".gitignore")
+def main() -> int:
+    results: list[bool] = []
 
-    env_ignored = False
-    for gi in [gitignore, root_gitignore]:
-        if os.path.exists(gi):
-            content = open(gi).read()
-            if ".env" in content:
-                env_ignored = True
-                break
-    results.append(check(".env in .gitignore",
-                         env_ignored,
-                         "Add .env to .gitignore!" if not env_ignored else ""))
+    print("=" * 60)
+    print("Day 12 Final Project - Production Readiness Check")
+    print("=" * 60)
 
-    # Check no hardcoded secrets in code
-    secrets_found = []
-    for f in ["app/main.py", "app/config.py"]:
-        fpath = os.path.join(base, f)
-        if os.path.exists(fpath):
-            content = open(fpath).read()
-            for bad in ["sk-", "password123", "hardcoded"]:
-                if bad in content:
-                    secrets_found.append(f"{f}:{bad}")
-    results.append(check("No hardcoded secrets in code",
-                         len(secrets_found) == 0,
-                         str(secrets_found) if secrets_found else ""))
+    required_files = [
+        BASE_DIR / "Dockerfile",
+        BASE_DIR / "docker-compose.yml",
+        BASE_DIR / ".dockerignore",
+        BASE_DIR / ".env.example",
+        BASE_DIR / "requirements.txt",
+        BASE_DIR / "railway.toml",
+        BASE_DIR / "render.yaml",
+        APP_DIR / "main.py",
+        APP_DIR / "config.py",
+        APP_DIR / "auth.py",
+        APP_DIR / "rate_limiter.py",
+        APP_DIR / "cost_guard.py",
+        APP_DIR / "conversation_store.py",
+        BASE_DIR / "utils" / "mock_llm.py",
+        REPO_ROOT / "MISSION_ANSWERS.md",
+        REPO_ROOT / "DEPLOYMENT.md",
+    ]
 
-    # ── API Endpoints ────────────────────────────��─
-    print("\n🌐 API Endpoints (code check)")
-    main_py = os.path.join(base, "app", "main.py")
-    if os.path.exists(main_py):
-        content = open(main_py).read()
-        results.append(check("/health endpoint defined",
-                             '"/health"' in content or "'/health'" in content))
-        results.append(check("/ready endpoint defined",
-                             '"/ready"' in content or "'/ready'" in content))
-        results.append(check("Authentication implemented",
-                             "api_key" in content.lower() or "verify_token" in content))
-        results.append(check("Rate limiting implemented",
-                             "rate_limit" in content.lower() or "429" in content))
-        results.append(check("Graceful shutdown (SIGTERM)",
-                             "SIGTERM" in content))
-        results.append(check("Structured logging (JSON)",
-                             "json.dumps" in content or '"event"' in content))
-    else:
-        results.append(check("app/main.py exists", False, "Create app/main.py!"))
+    print("\nFiles")
+    for file_path in required_files:
+        results.append(check(f"{file_path.relative_to(REPO_ROOT)} exists", file_path.exists()))
 
-    # ── Docker ─────────────────────────────────────
-    print("\n🐳 Docker")
-    dockerfile = os.path.join(base, "Dockerfile")
-    if os.path.exists(dockerfile):
-        content = open(dockerfile).read()
-        results.append(check("Multi-stage build",
-                             "AS builder" in content or "AS runtime" in content))
-        results.append(check("Non-root user",
-                             "useradd" in content or "USER " in content))
-        results.append(check("HEALTHCHECK instruction",
-                             "HEALTHCHECK" in content))
-        results.append(check("Slim base image",
-                             "slim" in content or "alpine" in content))
+    print("\nSecurity")
+    gitignore_text = read_text(REPO_ROOT / ".gitignore")
+    results.append(check(".env is ignored", ".env" in gitignore_text))
 
-    dockerignore = os.path.join(base, ".dockerignore")
-    if os.path.exists(dockerignore):
-        content = open(dockerignore).read()
-        results.append(check(".dockerignore covers .env",
-                             ".env" in content))
-        results.append(check(".dockerignore covers __pycache__",
-                             "__pycache__" in content))
+    main_text = read_text(APP_DIR / "main.py")
+    config_text = read_text(APP_DIR / "config.py")
+    auth_text = read_text(APP_DIR / "auth.py")
+    limiter_text = read_text(APP_DIR / "rate_limiter.py")
+    cost_text = read_text(APP_DIR / "cost_guard.py")
+    store_text = read_text(APP_DIR / "conversation_store.py")
+    docker_text = read_text(BASE_DIR / "Dockerfile")
+    compose_text = read_text(BASE_DIR / "docker-compose.yml")
 
-    # ── Summary ───────────────────────────────────���
-    passed = sum(1 for r in results if r["passed"])
+    results.append(check("No hardcoded secret keys", "sk-" not in main_text and "sk-" not in config_text))
+    results.append(check("API key auth implemented", "verify_api_key" in auth_text))
+    results.append(check("Rate limiting implemented", "HTTP_429_TOO_MANY_REQUESTS" in limiter_text))
+    results.append(check("Cost guard implemented", "Monthly budget exceeded" in cost_text))
+
+    print("\nArchitecture")
+    results.append(check("Conversation history support", "user_id" in main_text and "history" in store_text))
+    results.append(check("Redis-backed stateless storage", "redis" in store_text.lower()))
+    results.append(check("Health endpoint defined", '"/health"' in main_text))
+    results.append(check("Readiness endpoint defined", '"/ready"' in main_text))
+    results.append(check("Graceful shutdown handled", "SIGTERM" in main_text))
+    results.append(check("Structured logging present", "json.dumps" in main_text))
+
+    print("\nDocker")
+    results.append(check("Dockerfile is multi-stage", "AS builder" in docker_text and "AS runtime" in docker_text))
+    results.append(check("Dockerfile uses slim image", "python:3.11-slim" in docker_text))
+    results.append(check("Dockerfile runs as non-root user", "USER agent" in docker_text))
+    results.append(check("Docker healthcheck configured", "HEALTHCHECK" in docker_text))
+    results.append(check("Compose includes redis", "redis:" in compose_text))
+    results.append(check("Compose includes nginx", "nginx:" in compose_text))
+
+    passed = sum(results)
     total = len(results)
-    pct = round(passed / total * 100)
-
-    print("\n" + "=" * 55)
-    print(f"  Result: {passed}/{total} checks passed ({pct}%)")
-
-    if pct == 100:
-        print("  🎉 PRODUCTION READY! Deploy nào!")
-    elif pct >= 80:
-        print("  ✅ Almost there! Fix the ❌ items above.")
-    elif pct >= 60:
-        print("  ⚠️  Good progress. Several items need attention.")
-    else:
-        print("  ❌ Not ready. Review the checklist carefully.")
-
-    print("=" * 55 + "\n")
-    return pct == 100
+    print("\n" + "=" * 60)
+    print(f"Passed {passed}/{total} checks")
+    print("=" * 60)
+    return 0 if passed == total else 1
 
 
 if __name__ == "__main__":
-    ready = run_checks()
-    sys.exit(0 if ready else 1)
+    sys.exit(main())

@@ -27,6 +27,7 @@ from contextlib import asynccontextmanager
 
 
 from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field
 import uvicorn
 from utils.mock_llm import ask
 
@@ -36,6 +37,10 @@ logger = logging.getLogger(__name__)
 START_TIME = time.time()
 _is_ready = False
 _in_flight_requests = 0  # đếm số request đang xử lý
+
+
+class AskRequest(BaseModel):
+    question: str = Field(..., min_length=1, max_length=1000)
 
 
 @asynccontextmanager
@@ -91,10 +96,12 @@ def root():
 
 
 @app.post("/ask")
-async def ask_agent(question: str):
+async def ask_agent(body: AskRequest):
     if not _is_ready:
         raise HTTPException(503, "Agent not ready")
-    return {"answer": ask(question)}
+    if body.question.lower() == "long task":
+        time.sleep(5)
+    return {"answer": ask(body.question)}
 
 
 # ──────────────────────────────────────────────────────────

@@ -1,21 +1,30 @@
 """
-Test script: Chứng minh stateless agent hoạt động đúng khi scale.
+Test script: chứng minh stateless agent vẫn hoạt động khi một instance bị kill.
 
 Kịch bản:
-1. Tạo session mới
-2. Gửi 5 requests liên tiếp
-3. Xem "served_by" — mỗi request có thể đến instance khác
-4. Xem history — tất cả đều được lưu dù instance khác nhau
+1. Tạo session mới qua Nginx
+2. Gửi vài request để tạo conversation history
+3. Kill ngẫu nhiên một agent container
+4. Gửi tiếp request qua load balancer
+5. Verify history vẫn còn trong Redis
 
-Chạy sau khi docker compose up:
-    python test_stateless.py
+Chạy sau khi:
+    docker compose up --scale agent=3
 """
-import json
-import urllib.request
-import urllib.error
 
-BASE_URL = "http://localhost:8080"
-session_id = None
+from __future__ import annotations
+
+import json
+import os
+import random
+import subprocess
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+BASE_URL = os.getenv("STATELESS_BASE_URL", "http://localhost")
+SCRIPT_DIR = Path(__file__).resolve().parent
 
 
 def post(path: str, data: dict) -> dict:
@@ -25,58 +34,82 @@ def post(path: str, data: dict) -> dict:
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req) as resp:
+    with urllib.request.urlopen(req, timeout=10) as resp:
         return json.loads(resp.read())
 
 
 def get(path: str) -> dict:
-    with urllib.request.urlopen(f"{BASE_URL}{path}") as resp:
+    with urllib.request.urlopen(f"{BASE_URL}{path}", timeout=10) as resp:
         return json.loads(resp.read())
 
 
+def compose_agent_container_ids() -> list[str]:
+    result = subprocess.run(
+        ["docker", "compose", "ps", "-q", "agent"],
+        cwd=SCRIPT_DIR,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def kill_random_agent() -> str:
+    container_ids = compose_agent_container_ids()
+    if len(container_ids) < 2:
+        raise RuntimeError("Need at least 2 running agent containers to test failover")
+
+    victim = random.choice(container_ids)
+    subprocess.run(["docker", "stop", victim], cwd=SCRIPT_DIR, check=True)
+    return victim
+
+
 print("=" * 60)
-print("Stateless Scaling Demo")
+print("Stateless Failover Demo")
 print("=" * 60)
 
-questions = [
+questions_before_kill = [
     "What is Docker?",
     "Why do we need containers?",
     "What is Kubernetes?",
+]
+
+questions_after_kill = [
     "How does load balancing work?",
     "What is Redis used for?",
 ]
 
+session_id = None
 instances_seen = set()
 
-for i, question in enumerate(questions, 1):
-    result = post("/chat", {
-        "question": question,
-        "session_id": session_id,
-    })
+for i, question in enumerate(questions_before_kill, 1):
+    result = post("/chat", {"question": question, "session_id": session_id})
+    session_id = result["session_id"]
+    instances_seen.add(result.get("served_by", "unknown"))
+    print(f"Before kill {i}: [{result['served_by']}] {question}")
 
-    if session_id is None:
-        session_id = result["session_id"]
-        print(f"\nSession ID: {session_id}\n")
+victim = kill_random_agent()
+print(f"\nKilled agent container: {victim}\n")
+time.sleep(3)
 
-    instance = result.get("served_by", "unknown")
-    instances_seen.add(instance)
+for i, question in enumerate(questions_after_kill, 1):
+    result = post("/chat", {"question": question, "session_id": session_id})
+    instances_seen.add(result.get("served_by", "unknown"))
+    print(f"After kill {i}: [{result['served_by']}] {question}")
 
-    print(f"Request {i}: [{instance}]")
-    print(f"  Q: {question}")
-    print(f"  A: {result['answer'][:80]}...")
-    print()
-
-print("-" * 60)
-print(f"Total requests: {len(questions)}")
-print(f"Instances used: {instances_seen}")
-print(f"✅ All requests served despite different instances!" if len(instances_seen) > 1
-      else "ℹ️  Only 1 instance (scale up với: docker compose up --scale agent=3)")
-
-# Verify history is intact
-print("\n--- Conversation History ---")
 history = get(f"/chat/{session_id}/history")
-print(f"Total messages: {history['count']}")
-for msg in history["messages"]:
-    print(f"  [{msg['role']}]: {msg['content'][:60]}...")
+user_messages = [msg for msg in history["messages"] if msg["role"] == "user"]
 
-print("\n✅ Session history preserved across all instances via Redis!")
+print("\n" + "-" * 60)
+print(f"Session ID: {session_id}")
+print(f"Instances seen: {instances_seen}")
+print(f"History messages: {history['count']}")
+print(f"User turns persisted: {len(user_messages)}")
+
+expected_turns = len(questions_before_kill) + len(questions_after_kill)
+if len(user_messages) != expected_turns:
+    raise RuntimeError(
+        f"Expected {expected_turns} user turns after failover, got {len(user_messages)}"
+    )
+
+print("Session history survived instance failure via Redis.")

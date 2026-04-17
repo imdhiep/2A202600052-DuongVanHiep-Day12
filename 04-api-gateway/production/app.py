@@ -5,7 +5,7 @@ Kết hợp:
   ✅ JWT Authentication
   ✅ Role-based access (user / admin)
   ✅ Rate limiting (sliding window)
-  ✅ Cost guard (daily budget)
+  ✅ Cost guard (monthly budget)
   ✅ Input validation
   ✅ Security headers
 
@@ -13,9 +13,9 @@ Chạy:
     python app.py
 
 Lấy token:
-    curl -X POST http://localhost:8000/auth/token \\
+    curl -X POST http://localhost:8000/token \\
          -H "Content-Type: application/json" \\
-         -d '{"username": "student", "password": "demo123"}'
+         -d '{"username": "admin", "password": "secret"}'
 
 Dùng token:
     curl -H "Authorization: Bearer <token>" \\
@@ -36,8 +36,8 @@ from pydantic import BaseModel, Field
 import uvicorn
 
 from auth import verify_token, authenticate_user, create_token
-from rate_limiter import rate_limiter_user, rate_limiter_admin
-from cost_guard import cost_guard
+from rate_limiter import rate_limiter_user
+from cost_guard import enforce_budget, get_usage, estimate_cost
 from utils.mock_llm import ask
 
 logging.basicConfig(level=logging.INFO)
@@ -102,6 +102,7 @@ class LoginRequest(BaseModel):
 # ──────────────────────────────────────────────────────────
 
 @app.post("/auth/token")
+@app.post("/token")
 def login(body: LoginRequest):
     """
     Public endpoint. Đổi username/password lấy JWT token.
@@ -136,27 +137,38 @@ async def ask_agent(
     username = user["username"]
     role = user["role"]
 
-    # ✅ Rate limiting — theo role
-    limiter = rate_limiter_admin if role == "admin" else rate_limiter_user
-    rate_info = limiter.check(username)
+    if role == "admin":
+        rate_info = {
+            "limit": "unlimited",
+            "remaining": "unlimited",
+            "bypassed": True,
+        }
+    else:
+        rate_limit_status = rate_limiter_user.check(username)
+        rate_info = {
+            "limit": rate_limit_status["limit"],
+            "remaining": rate_limit_status["remaining"],
+            "bypassed": False,
+        }
 
-    # ✅ Cost check trước khi gọi LLM
-    cost_guard.check_budget(username)
+    estimated_input_tokens = max(1, len(body.question.split()) * 2)
+    estimated_output_tokens = max(1, estimated_input_tokens * 2)
+    budget = enforce_budget(
+        username,
+        estimate_cost(estimated_input_tokens, estimated_output_tokens),
+    )
 
     # Gọi LLM (mock)
     response_text = ask(body.question)
-
-    # ✅ Ghi nhận usage (mock token count)
-    input_tokens = len(body.question.split()) * 2
-    output_tokens = len(response_text.split()) * 2
-    usage = cost_guard.record_usage(username, input_tokens, output_tokens)
 
     return {
         "question": body.question,
         "answer": response_text,
         "usage": {
             "requests_remaining": rate_info["remaining"],
-            "budget_remaining_usd": usage.total_cost_usd,
+            "budget_remaining_usd": budget["remaining_usd"],
+            "budget_used_usd": budget["used_usd"],
+            "rate_limit_bypassed": rate_info["bypassed"],
         },
     }
 
@@ -164,7 +176,7 @@ async def ask_agent(
 @app.get("/me/usage")
 def my_usage(user: dict = Depends(verify_token)):
     """Xem usage của bản thân."""
-    return cost_guard.get_usage(user["username"])
+    return get_usage(user["username"])
 
 
 @app.get("/admin/stats")
@@ -172,10 +184,12 @@ def admin_stats(user: dict = Depends(verify_token)):
     """Admin only: xem tổng stats."""
     if user["role"] != "admin":
         raise HTTPException(403, "Admin only")
+    usage = get_usage(user["username"])
     return {
-        "total_users": "N/A (in-memory demo)",
-        "global_cost_usd": cost_guard._global_cost,
-        "global_budget_usd": cost_guard.global_daily_budget_usd,
+        "total_users": "N/A (Redis budget demo)",
+        "global_cost_usd": usage["global_used_usd"],
+        "global_budget_usd": usage["global_budget_usd"],
+        "current_month": usage["month"],
     }
 
 
@@ -196,7 +210,7 @@ def health():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
     print("\n=== Demo credentials ===")
-    print("  student / demo123  (10 req/min, $1/day budget)")
-    print("  teacher / teach456 (100 req/min, $1/day budget)")
+    print("  student / demo123  (10 req/min, $10/month budget)")
+    print("  admin / secret     (JWT auth, rate-limit bypass)")
     print(f"\nDocs: http://localhost:{port}/docs\n")
     uvicorn.run(app, host="0.0.0.0", port=port, reload=True)

@@ -24,6 +24,7 @@ import os
 
 from fastapi import FastAPI, HTTPException, Security, Depends
 from fastapi.security.api_key import APIKeyHeader
+from pydantic import BaseModel, Field
 import uvicorn
 from utils.mock_llm import ask
 
@@ -32,8 +33,12 @@ app = FastAPI(title="Agent with API Key Auth")
 # ──────────────────────────────────────
 # API Key setup
 # ──────────────────────────────────────
-API_KEY = os.getenv("AGENT_API_KEY", "demo-key-change-in-production")
+API_KEY = os.getenv("AGENT_API_KEY", "secret-key-123")
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+
+class AskRequest(BaseModel):
+    question: str = Field(..., min_length=1, max_length=1000)
 
 
 def verify_api_key(api_key: str = Security(api_key_header)) -> str:
@@ -66,13 +71,13 @@ def root():
 
 @app.post("/ask")
 async def ask_agent(
-    question: str,
+    body: AskRequest,
     _key: str = Depends(verify_api_key),  # ✅ require auth
 ):
     """Protected endpoint — cần X-API-Key header"""
     return {
-        "question": question,
-        "answer": ask(question),
+        "question": body.question,
+        "answer": ask(body.question),
     }
 
 
@@ -85,5 +90,10 @@ def health():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
     print(f"API Key: {API_KEY}")
-    print(f"Test: curl -H 'X-API-Key: {API_KEY}' http://localhost:{port}/ask?question=hello")
+    print(
+        "Test: curl -X POST "
+        f"-H 'X-API-Key: {API_KEY}' "
+        "-H 'Content-Type: application/json' "
+        f"-d '{{\"question\":\"hello\"}}' http://localhost:{port}/ask"
+    )
     uvicorn.run(app, host="0.0.0.0", port=port, reload=True)

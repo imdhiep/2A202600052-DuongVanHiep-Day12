@@ -257,7 +257,7 @@ railway init
 4. Set environment variables:
 ```bash
 railway variables set PORT=8000
-railway variables set AGENT_API_KEY=my-secret-key
+railway variables set AGENT_API_KEY=day12-agent-api-key-vinuni-2026-secure
 ```
 
 5. Deploy:
@@ -275,7 +275,7 @@ railway domain
 Test:
 ```bash
 # Health check
-curl http://student-agent-domain/health
+curl https://day12-production-d371.up.railway.app/health
 
 # Agent endpoint
 curl http://studen-agent-domain/ask -X POST \
