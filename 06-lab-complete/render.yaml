@@ -11,13 +11,19 @@ services:
         value: production
       - key: APP_VERSION
         value: "1.0.0"
+      - key: REDIS_URL
+        sync: false
       - key: OPENAI_API_KEY
         sync: false
       - key: AGENT_API_KEY
         generateValue: true
       - key: JWT_SECRET
         generateValue: true
-      - key: DAILY_BUDGET_USD
-        value: "5.0"
+      - key: MONTHLY_BUDGET_USD
+        value: "10.0"
+      - key: GLOBAL_MONTHLY_BUDGET_USD
+        value: "100.0"
       - key: RATE_LIMIT_PER_MINUTE
-        value: "20"
+        value: "10"
+      - key: WEB_CONCURRENCY
+        value: "2"
